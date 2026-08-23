@@ -1,0 +1,79 @@
+{
+	"name": "schematic-structure-text-bridge",
+	"uuid": "a0e032396e0443d8980e74d9c547a4ef",
+	"displayName": "让AI看看你的原理图",
+	"description": "本插件提供让AI进行原理图设计、分析、修改的能力，支持包括网页版在内的任意AI工具。",
+	"version": "1.1.23",
+	"publisher": "Yt禾斗rY",
+	"engines": {
+		"eda": "^4.2.0"
+	},
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "extension-store",
+		"url": "https://github.com/2549850807/Let-the-AI-look-at-the-schematic.git"
+	},
+	"categories": "Other",
+	"keywords": [
+		"Schematic",
+		"Structure",
+		"Netlist",
+		"AI"
+	],
+	"images": {
+		"logo": "./images/logo.png"
+	},
+	"homepage": "",
+	"bugs": "",
+	"activationEvents": {
+		"onStartupFinished": "activate"
+	},
+	"entry": "./dist/index",
+	"dependentExtensions": {},
+	"headerMenus": {
+		"sch": [
+			{
+				"id": "schematicStructureTextBridge",
+				"title": "让AI看看你的原理图",
+				"menuItems": [
+					{
+						"id": "phase1ExportRegionStructure",
+						"title": "导出连接关系",
+						"registerFn": "phase1ExportRegionStructure"
+					},
+					{
+						"id": "phase2OpenRegionImportInput",
+						"title": "导入连接关系",
+						"registerFn": "phase2OpenRegionImportInput"
+					},
+					{
+						"id": "phase4UndoPersistentFullRegionConversion",
+						"title": "撤回上一次的导入",
+						"registerFn": "phase4UndoPersistentFullRegionConversion"
+					},
+					{
+						"id": "showAiCollaborationGuide",
+						"title": "与AI联动",
+						"registerFn": "showAiCollaborationGuide"
+					},
+					{
+						"id": "about",
+						"title": "关于",
+						"menuItems": [
+							{
+								"id": "aboutExtension",
+								"title": "插件信息",
+								"registerFn": "about"
+							},
+							{
+								"id": "phase4RunOneClickFullDebug",
+								"title": "全面检查",
+								"registerFn": "phase4RunOneClickFullDebug"
+							}
+						]
+					}
+				]
+			}
+		]
+	}
+}

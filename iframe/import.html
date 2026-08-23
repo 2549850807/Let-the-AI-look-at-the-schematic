@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-Hans">
+	<head>
+		<title>原理图结构文本桥：粘贴区域结构 JSON</title>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<style>
+			:root { color-scheme: light dark; font-family: Inter, "Microsoft YaHei", sans-serif; }
+			* { box-sizing: border-box; }
+			body { margin: 0; background: #f4f6f8; color: #1f2937; }
+			main { height: 100vh; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+			header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+			h1 { margin: 0; font-size: 18px; }
+			.actions { display: flex; align-items: center; gap: 8px; }
+			button { border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px 14px; background: #fff; color: #1f2937; cursor: pointer; }
+			button.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+			button:hover { filter: brightness(.96); }
+			#status { min-width: 120px; font-size: 13px; color: #047857; text-align: right; }
+			textarea { flex: 1; width: 100%; resize: none; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; background: #fff; color: #111827; font: 13px/1.55 Consolas, "Microsoft YaHei", monospace; tab-size: 2; white-space: pre; }
+			footer { font-size: 12px; color: #64748b; }
+			@media (prefers-color-scheme: dark) {
+				body { background: #111827; color: #e5e7eb; }
+				button { background: #1f2937; border-color: #475569; color: #e5e7eb; }
+				button.primary { background: #2563eb; border-color: #3b82f6; }
+				textarea { background: #0f172a; border-color: #475569; color: #e5e7eb; }
+				footer { color: #94a3b8; }
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>粘贴区域结构 JSON</h1>
+				<div class="actions">
+					<span id="status"></span>
+					<button id="clear">清空</button>
+					<button id="save">保存</button>
+					<button id="import" class="primary">保存并导入</button>
+				</div>
+			</header>
+			<textarea id="content" spellcheck="false" placeholder="请粘贴 jlc-schematic-region JSON"></textarea>
+		</main>
+		<script>
+			const STORAGE_KEY = 'phase2ImportTextV1';
+			const ACTION_STORAGE_KEY = 'phase2ImportActionV1';
+			const IFRAME_ID = 'phase2-import-window';
+			let api = globalThis.eda;
+			try {
+				api ||= globalThis.parent?.eda;
+			}
+			catch {}
+			const content = document.querySelector('#content');
+			const status = document.querySelector('#status');
+			content.value = '';
+
+			function showStatus(message, error = false) {
+				status.textContent = message;
+				status.style.color = error ? '#dc2626' : '#047857';
+				setTimeout(() => { status.textContent = ''; }, 3000);
+			}
+
+			async function save(requestImport) {
+				if (!api?.sys_Storage) {
+					showStatus('无法访问扩展存储', true);
+					return false;
+				}
+				const value = content.value.trim();
+				if (!value) {
+					showStatus('请输入 JSON', true);
+					return false;
+				}
+				try {
+					JSON.parse(value);
+				}
+				catch {
+					showStatus('JSON 格式无效', true);
+					return false;
+				}
+				const saved = await api.sys_Storage.setExtensionUserConfig(STORAGE_KEY, value);
+				if (!saved) {
+					showStatus('保存失败', true);
+					return false;
+				}
+				if (requestImport) {
+					const requested = await api.sys_Storage.setExtensionUserConfig(ACTION_STORAGE_KEY, 'import');
+					showStatus(requested ? '正在导入' : '无法启动导入', !requested);
+					if (requested && api.sys_IFrame) {
+						await api.sys_IFrame.closeIFrame(IFRAME_ID);
+					}
+					return requested;
+				}
+				showStatus('已保存');
+				return true;
+			}
+
+			document.querySelector('#save').addEventListener('click', () => save(false));
+			document.querySelector('#import').addEventListener('click', () => save(true));
+
+			document.querySelector('#clear').addEventListener('click', () => {
+				content.value = '';
+				content.focus();
+				showStatus('已清空编辑区');
+			});
+		</script>
+	</body>
+</html>

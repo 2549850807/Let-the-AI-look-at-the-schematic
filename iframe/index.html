@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-Hans">
+	<head>
+		<title>阶段 0 探针预览</title>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<style>
+			:root { color-scheme: light dark; font-family: Inter, "Microsoft YaHei", sans-serif; }
+			* { box-sizing: border-box; }
+			body { margin: 0; background: #f4f6f8; color: #1f2937; }
+			main { height: 100vh; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+			header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+			h1 { margin: 0; font-size: 18px; }
+			.actions { display: flex; align-items: center; gap: 8px; }
+			button { border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px 14px; background: #fff; color: #1f2937; cursor: pointer; }
+			button.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+			button:hover { filter: brightness(.96); }
+			#status { min-width: 100px; font-size: 13px; color: #047857; text-align: right; }
+			#tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+			#tabs button.active { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
+			textarea { flex: 1; width: 100%; resize: none; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; background: #fff; color: #111827; font: 13px/1.55 Consolas, "Microsoft YaHei", monospace; tab-size: 2; white-space: pre; }
+			footer { font-size: 12px; color: #64748b; }
+			@media (prefers-color-scheme: dark) {
+				body { background: #111827; color: #e5e7eb; }
+				button { background: #1f2937; border-color: #475569; color: #e5e7eb; }
+				button.primary { background: #2563eb; border-color: #3b82f6; }
+				#tabs button.active { background: #172554; color: #93c5fd; }
+				textarea { background: #0f172a; border-color: #475569; color: #e5e7eb; }
+				footer { color: #94a3b8; }
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1 id="title">阶段 0 探针预览</h1>
+				<div class="actions">
+					<span id="status"></span>
+					<button id="copy-current" class="primary">一键复制</button>
+					<button id="copy" class="primary" hidden>复制全部</button>
+				</div>
+			</header>
+			<nav id="tabs"></nav>
+			<textarea id="content" readonly spellcheck="false"></textarea>
+			<footer id="meta"></footer>
+		</main>
+		<script>
+			const STORAGE_KEY = 'phase0PreviewPayloadV1';
+			let api = globalThis.eda;
+			try {
+				api ||= globalThis.parent?.eda;
+			}
+			catch {}
+			const payload = api?.sys_Storage?.getExtensionUserConfig(STORAGE_KEY) || {
+				title: '无法读取预览数据',
+				tabs: [{ label: '错误', content: '内联窗口无法访问扩展存储 API。请关闭窗口后重新运行探针。' }],
+			};
+			const title = document.querySelector('#title');
+			const tabs = document.querySelector('#tabs');
+			const content = document.querySelector('#content');
+			const status = document.querySelector('#status');
+			const meta = document.querySelector('#meta');
+			const copyCurrentButton = document.querySelector('#copy-current');
+			const copyAllButton = document.querySelector('#copy');
+			let activeIndex = 0;
+
+			function render() {
+				title.textContent = payload.title || '阶段 0 探针预览';
+				const supportsCopyAll = payload.copyAll === true;
+				copyCurrentButton.textContent = supportsCopyAll ? '复制当前' : '一键复制';
+				copyCurrentButton.classList.toggle('primary', !supportsCopyAll);
+				copyAllButton.hidden = !supportsCopyAll;
+				tabs.replaceChildren();
+				(payload.tabs || []).forEach((tab, index) => {
+					const button = document.createElement('button');
+					button.textContent = tab.label || `内容 ${index + 1}`;
+					button.classList.toggle('active', index === activeIndex);
+					button.addEventListener('click', () => { activeIndex = index; render(); });
+					tabs.append(button);
+				});
+				const active = payload.tabs?.[activeIndex];
+				content.value = active?.content || '';
+				meta.textContent = active ? `当前内容：${active.label} · ${content.value.length.toLocaleString()} 个字符` : '没有内容';
+			}
+
+			async function copyText(text) {
+				try {
+					await navigator.clipboard.writeText(text);
+					status.textContent = '已复制';
+				}
+				catch {
+					content.value = text;
+					content.focus();
+					content.select();
+					const copied = document.execCommand('copy');
+					status.textContent = copied ? '已复制' : '复制失败，请按 Ctrl+C';
+					render();
+				}
+				setTimeout(() => { status.textContent = ''; }, 2500);
+			}
+
+			function copyCurrent() {
+				return copyText(payload.tabs?.[activeIndex]?.content || '');
+			}
+
+			function copyAll() {
+				return copyText([payload.title || '调试结果', ...(payload.tabs || []).map(tab => `${tab.label || '内容'}：\n${tab.content || ''}`)].join('\n\n'));
+			}
+
+			copyCurrentButton.addEventListener('click', copyCurrent);
+			copyAllButton.addEventListener('click', copyAll);
+			render();
+		</script>
+	</body>
+</html>
