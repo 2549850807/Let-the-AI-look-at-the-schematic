@@ -66,7 +66,7 @@ var edaEsbuildExportName = (() => {
     uuid: "a0e032396e0443d8980e74d9c547a4ef",
     displayName: "\u8BA9AI\u770B\u770B\u4F60\u7684\u539F\u7406\u56FE",
     description: "\u672C\u63D2\u4EF6\u63D0\u4F9B\u8BA9AI\u8FDB\u884C\u539F\u7406\u56FE\u8BBE\u8BA1\u3001\u5206\u6790\u3001\u4FEE\u6539\u7684\u80FD\u529B\uFF0C\u652F\u6301\u5305\u62EC\u7F51\u9875\u7248\u5728\u5185\u7684\u4EFB\u610FAI\u5DE5\u5177\u3002",
-    version: "1.1.23",
+    version: "1.1.26",
     publisher: "Yt\u79BE\u6597rY",
     engines: {
       eda: "^4.2.0"

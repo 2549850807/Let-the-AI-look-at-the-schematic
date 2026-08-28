@@ -9,7 +9,6 @@
 /node_modules/
 /src/
 /assets/
-/video/
 /.editorconfig
 /.gitattributes
 /.gitignore
