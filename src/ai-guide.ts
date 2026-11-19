@@ -238,15 +238,16 @@ async function currentSelectionConnectionJson(): Promise<string> {
 }
 
 export async function showAiGuide(): Promise<void> {
-	await runProbe('与AI联动', async () => {
+	await runProbe('与AI联动', async (finishLoading) => {
 		const connectionJson = await currentSelectionConnectionJson();
 		const analysisPrompt = analysisPromptTemplate.replace(connectionJsonPlaceholder, () => connectionJson);
 		const modificationPrompt = modificationPromptTemplate.replace(connectionJsonPlaceholder, () => connectionJson);
+		finishLoading();
 		await showPreview('让AI看看你的原理图：与AI联动', [
 			{ label: '让 AI 设计', content: designPrompt },
 			{ label: '让 AI 分析', content: analysisPrompt },
 			{ label: '让 AI 修改', content: modificationPrompt },
 			{ label: '格式含义', content: formatDescription },
 		]);
-	});
+	}, '正在加载 AI 联动内容，请稍候…');
 }

@@ -7,6 +7,11 @@
 /config/
 /coverage/
 /node_modules/
+/tests/
+/mcp/
+/.local-mcp/
+/MCP*.md
+/AI工具接入方案.md
 /src/
 /assets/
 /.editorconfig

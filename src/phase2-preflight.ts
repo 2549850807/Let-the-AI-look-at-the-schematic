@@ -40,6 +40,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isRegionExportRoot(value: unknown): value is Record<string, unknown> {
+	return isRecord(value) && value.format === 'jlc-schematic-region';
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | undefined {
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return isRecord(parsed) ? parsed : undefined;
+	}
+	catch {
+		return undefined;
+	}
+}
+
+export function extractRegionJsonText(raw: string): string | undefined {
+	const text = raw.replace(/^\uFEFF/, '').trim();
+	if (!text) {
+		return undefined;
+	}
+	if (isRegionExportRoot(parseJsonObject(text))) {
+		return text;
+	}
+	let cursor = 0;
+	while (cursor < text.length) {
+		const opening = text.indexOf('```', cursor);
+		if (opening < 0) {
+			break;
+		}
+		const lineEnd = text.indexOf('\n', opening + 3);
+		if (lineEnd < 0) {
+			break;
+		}
+		const language = text.slice(opening + 3, lineEnd).trim().toLowerCase();
+		const closing = text.indexOf('```', lineEnd + 1);
+		if (closing < 0) {
+			break;
+		}
+		if (!language || language === 'json') {
+			const candidate = text.slice(lineEnd + 1, closing).trim();
+			if (isRegionExportRoot(parseJsonObject(candidate))) {
+				return candidate;
+			}
+		}
+		cursor = closing + 3;
+	}
+	return undefined;
+}
+
 function stringValue(value: unknown): string | undefined {
 	return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -215,7 +263,11 @@ export function parseRegionInput(raw: string): ParseResult {
 	const ignoredFields: Array<string> = [];
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(raw) as unknown;
+		const jsonText = extractRegionJsonText(raw);
+		if (!jsonText) {
+			throw new Error('未找到 jlc-schematic-region JSON。请粘贴纯 JSON，或包含完整 JSON 代码块的 AI 回复。');
+		}
+		parsed = JSON.parse(jsonText) as unknown;
 	}
 	catch (error) {
 		issues.push({ level: 'blocker', code: 'INVALID_JSON', message: `JSON 解析失败：${error instanceof Error ? error.message : String(error)}` });
@@ -374,56 +426,118 @@ export function compareRegions(input: RegionExport, current: RegionExport): { is
 
 export async function openRegionImportInput(): Promise<boolean> {
 	let importRequested = false;
-	await runProbe('区域结构文本输入', async () => {
+	const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	await runProbe('区域结构文本输入', async (finishLoading) => {
 		const currentSnapshot = await buildCurrentRegionSnapshot();
 		const snapshotSaved = await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, currentSnapshot);
 		if (!snapshotSaved) {
 			throw new Error('无法保存当前框选快照，已阻止导入。');
 		}
-		await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, '');
-		const actionCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, '');
+		const textCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, '');
+		if (!textCleared) {
+			throw new Error('无法初始化导入文本，已阻止导入。');
+		}
+		const actionCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, { sessionId, status: 'ready' });
 		if (!actionCleared) {
 			throw new Error('无法初始化导入窗口，已阻止导入。');
 		}
 		if (await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID)) {
 			await eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID);
 		}
-		const opened = await eda.sys_IFrame.openIFrame('/iframe/import.html', 920, 680, IMPORT_IFRAME_ID, {
+		let opened: boolean | undefined;
+		let openError: string | undefined;
+		let cancelled = false;
+		finishLoading();
+		void eda.sys_IFrame.openIFrame('/iframe/import.html', 920, 680, IMPORT_IFRAME_ID, {
 			maximizeButton: true,
 			minimizeButton: true,
 			grayscaleMask: false,
 			title: '原理图结构文本桥：粘贴区域结构 JSON',
+			onBeforeCloseCallFn: () => {
+				cancelled = true;
+				return true;
+			},
+			buttonCallbackFn: (button) => {
+				if (button === 'close') {
+					cancelled = true;
+				}
+			},
+		}).then((result) => {
+			opened = result;
+		}, (error: unknown) => {
+			openError = error instanceof Error ? error.message : String(error);
 		});
-		if (!opened) {
-			throw new Error('结构 JSON 输入窗口打开失败。');
-		}
 		let observedOpenWindow = false;
 		let consecutiveClosedSamples = 0;
 		for (let sampleIndex = 0; sampleIndex < 14_400; sampleIndex += 1) {
-			const action = eda.sys_Storage.getExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY);
-			if (action === 'import') {
-				importRequested = true;
-				await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, '');
-				if (await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID)) {
-					await eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID);
-				}
+			if (cancelled) {
 				break;
 			}
+			const action = eda.sys_Storage.getExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY);
+			if (!isRecord(action) || action.sessionId !== sessionId) {
+				break;
+			}
+			if (isRecord(action) && action.sessionId === sessionId && action.status === 'requested') {
+				try {
+					if (typeof action.requestedAt !== 'number' || !Number.isFinite(action.requestedAt)
+						|| Date.now() - action.requestedAt > 15_000) {
+						throw new Error('导入请求已超时，请重新打开“导入连接关系”后再试。');
+					}
+					if (typeof action.text !== 'string' || !action.text.trim()) {
+						throw new Error('导入请求中没有连接关系文本。');
+					}
+					if (!await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, action.text)) {
+						throw new Error('保存导入文本失败。');
+					}
+					if (!await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, {
+						sessionId,
+						status: 'accepted',
+					})) {
+						throw new Error('无法确认导入请求，已停止导入。');
+					}
+					void Promise.resolve().then(() => eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID)).catch((error: unknown) => {
+						console.error('关闭导入窗口失败', error);
+					});
+					importRequested = true;
+					break;
+				}
+				catch (error) {
+					try {
+						await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, {
+							sessionId,
+							status: 'failed',
+							message: error instanceof Error ? error.message : String(error),
+						});
+					}
+					catch (storageError) {
+						console.error('无法保存导入失败状态', storageError);
+					}
+					throw error;
+				}
+			}
+			if (openError !== undefined || opened === false) {
+				throw new Error(`结构 JSON 输入窗口打开失败。${openError ?? ''}`);
+			}
 			const windowOpen = await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID);
+			if (cancelled) {
+				break;
+			}
 			if (windowOpen) {
 				observedOpenWindow = true;
 				consecutiveClosedSamples = 0;
 			}
 			else {
 				consecutiveClosedSamples += 1;
-				if ((observedOpenWindow && consecutiveClosedSamples >= 4)
-					|| (!observedOpenWindow && sampleIndex >= 12)) {
+				if (observedOpenWindow && consecutiveClosedSamples >= 4) {
 					break;
+				}
+				if (!observedOpenWindow && sampleIndex >= 120) {
+					throw new Error('导入窗口加载超时，请重新打开“导入连接关系”。');
 				}
 			}
 			await new Promise(resolve => globalThis.setTimeout(resolve, 250));
 		}
-	});
+	}, '正在加载导入窗口，请稍候…');
 	return importRequested;
 }
 

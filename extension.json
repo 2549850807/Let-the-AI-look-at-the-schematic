@@ -3,7 +3,7 @@
 	"uuid": "a0e032396e0443d8980e74d9c547a4ef",
 	"displayName": "让AI看看你的原理图",
 	"description": "本插件提供让AI进行原理图设计、分析、修改的能力，支持包括网页版在内的任意AI工具。",
-	"version": "1.1.26",
+	"version": "1.1.34",
 	"publisher": "Yt禾斗rY",
 	"engines": {
 		"eda": "^4.2.0"

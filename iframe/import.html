@@ -15,7 +15,9 @@
 			button { border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px 14px; background: #fff; color: #1f2937; cursor: pointer; }
 			button.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
 			button:hover { filter: brightness(.96); }
+			button:disabled { opacity: .55; cursor: wait; }
 			#status { min-width: 120px; font-size: 13px; color: #047857; text-align: right; }
+			#status { max-width: 380px; }
 			textarea { flex: 1; width: 100%; resize: none; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; background: #fff; color: #111827; font: 13px/1.55 Consolas, "Microsoft YaHei", monospace; tab-size: 2; white-space: pre; }
 			footer { font-size: 12px; color: #64748b; }
 			@media (prefers-color-scheme: dark) {
@@ -32,7 +34,7 @@
 			<header>
 				<h1>粘贴区域结构 JSON</h1>
 				<div class="actions">
-					<span id="status"></span>
+						<span id="status" role="status" aria-live="polite"></span>
 					<button id="clear">清空</button>
 					<button id="save">保存</button>
 					<button id="import" class="primary">保存并导入</button>
@@ -51,46 +53,128 @@
 			catch {}
 			const content = document.querySelector('#content');
 			const status = document.querySelector('#status');
+			const actions = [...document.querySelectorAll('button')];
+			let busy = false;
 			content.value = '';
 
 			function showStatus(message, error = false) {
 				status.textContent = message;
 				status.style.color = error ? '#dc2626' : '#047857';
-				setTimeout(() => { status.textContent = ''; }, 3000);
+			}
+
+			async function storageCall(operation) {
+				let timer;
+				try {
+					return await Promise.race([
+						Promise.resolve().then(operation),
+						new Promise((resolve, reject) => {
+							timer = setTimeout(() => reject(new Error('扩展存储响应超时，请关闭窗口后重新打开“导入连接关系”。')), 10000);
+						}),
+					]);
+				}
+				finally {
+					clearTimeout(timer);
+				}
+			}
+
+			function extractRegionJson(value) {
+				const text = value.replace(/^\uFEFF/, '').trim();
+				try {
+					const parsed = JSON.parse(text);
+					if (parsed && typeof parsed === 'object' && parsed.format === 'jlc-schematic-region') {
+						return { value: text, extracted: false };
+					}
+				}
+				catch {}
+				let cursor = 0;
+				while (cursor < text.length) {
+					const opening = text.indexOf('```', cursor);
+					if (opening < 0) break;
+					const lineEnd = text.indexOf('\n', opening + 3);
+					if (lineEnd < 0) break;
+					const language = text.slice(opening + 3, lineEnd).trim().toLowerCase();
+					const closing = text.indexOf('```', lineEnd + 1);
+					if (closing < 0) break;
+					if (!language || language === 'json') {
+						const candidate = text.slice(lineEnd + 1, closing).trim();
+						try {
+							const parsed = JSON.parse(candidate);
+							if (parsed && typeof parsed === 'object' && parsed.format === 'jlc-schematic-region') {
+								return { value: candidate, extracted: true };
+							}
+						}
+						catch {}
+					}
+					cursor = closing + 3;
+				}
+				return undefined;
+			}
+
+			function setBusy(busy) {
+				actions.forEach((button) => { button.disabled = busy; });
 			}
 
 			async function save(requestImport) {
-				if (!api?.sys_Storage) {
-					showStatus('无法访问扩展存储', true);
-					return false;
-				}
-				const value = content.value.trim();
-				if (!value) {
-					showStatus('请输入 JSON', true);
-					return false;
-				}
+				if (busy) return false;
+				busy = true;
+				setBusy(true);
+				let accepted = false;
 				try {
-					JSON.parse(value);
-				}
-				catch {
-					showStatus('JSON 格式无效', true);
-					return false;
-				}
-				const saved = await api.sys_Storage.setExtensionUserConfig(STORAGE_KEY, value);
-				if (!saved) {
-					showStatus('保存失败', true);
-					return false;
-				}
-				if (requestImport) {
-					const requested = await api.sys_Storage.setExtensionUserConfig(ACTION_STORAGE_KEY, 'import');
-					showStatus(requested ? '正在导入' : '无法启动导入', !requested);
-					if (requested && api.sys_IFrame) {
-						await api.sys_IFrame.closeIFrame(IFRAME_ID);
+					if (!api?.sys_Storage) {
+						throw new Error('无法访问扩展存储，请关闭窗口后重新打开。');
 					}
-					return requested;
+					const result = extractRegionJson(content.value);
+					if (!result) {
+						throw new Error('未找到可导入的 JSON，请粘贴完整 JSON 或含 JSON 代码块的 AI 回复。');
+					}
+					showStatus('正在保存连接关系…');
+					const saved = await storageCall(() => api.sys_Storage.setExtensionUserConfig(STORAGE_KEY, result.value));
+					if (!saved) throw new Error('保存失败，请重试。');
+					content.value = result.value;
+					if (!requestImport) {
+						showStatus(result.extracted ? '已提取并保存 JSON，点击“保存并导入”开始执行。' : '已保存，点击“保存并导入”开始执行。');
+						return true;
+					}
+					const session = await storageCall(() => api.sys_Storage.getExtensionUserConfig(ACTION_STORAGE_KEY));
+					if (!session || typeof session.sessionId !== 'string' || session.status !== 'ready') {
+						throw new Error('导入窗口已失效或请求已被处理，请关闭窗口后重新打开“导入连接关系”。');
+					}
+					const requestedAt = Date.now();
+					const requested = await storageCall(() => api.sys_Storage.setExtensionUserConfig(ACTION_STORAGE_KEY, {
+						sessionId: session.sessionId, status: 'requested', text: result.value, requestedAt,
+					}));
+					if (!requested) throw new Error('无法发送导入请求，请重新打开导入窗口。');
+					showStatus('正在准备导入…');
+					while (Date.now() - requestedAt < 20000) {
+						const response = await storageCall(() => api.sys_Storage.getExtensionUserConfig(ACTION_STORAGE_KEY));
+						if (!response || response.sessionId !== session.sessionId) {
+							throw new Error('导入会话已变化，请重新打开导入窗口。');
+						}
+						if (response.status === 'failed') throw new Error(response.message || '无法启动导入，请重试。');
+						if (response.status === 'accepted') {
+							accepted = true;
+							showStatus('正在检查连接关系…');
+							if (api.sys_IFrame) {
+								const closed = await storageCall(() => api.sys_IFrame.closeIFrame(IFRAME_ID));
+								if (!closed) showStatus('导入已启动，输入窗口未能关闭，请手动关闭此窗口。', true);
+							}
+							return true;
+						}
+						await new Promise(resolve => setTimeout(resolve, 250));
+					}
+					throw new Error('导入暂时没有响应，请关闭窗口后重试。');
 				}
-				showStatus('已保存');
-				return true;
+				catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					showStatus(accepted ? `导入已启动，但输入窗口关闭失败，请手动关闭此窗口。${message}` : message, true);
+					return accepted;
+				}
+				finally {
+					if (!accepted) {
+						busy = false;
+						setBusy(false);
+					}
+				}
 			}
 
 			document.querySelector('#save').addEventListener('click', () => save(false));

@@ -542,12 +542,13 @@ export async function buildCurrentRegionSnapshot(): Promise<StoredRegionSnapshot
 }
 
 export async function exportRegionStructure(): Promise<void> {
-	await runProbe('区域结构导出', async () => {
+	await runProbe('区域结构导出', async (finishLoading) => {
 		const snapshot = await buildCurrentRegionSnapshot();
 		await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, snapshot);
+		finishLoading();
 		await showPreview('原理图结构文本桥：导出连接关系', [
 			jsonPreviewTab('区域结构 JSON', snapshot.region),
 			jsonPreviewTab('导出诊断', snapshot.diagnostics),
 		]);
-	});
+	}, '正在加载连接关系，请稍候…');
 }

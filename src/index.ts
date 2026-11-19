@@ -107,11 +107,26 @@ export function phase1ExportRegionStructure(): void {
 	void exportRegionStructure();
 }
 
+let regionImportInProgress = false;
+
 export function phase2OpenRegionImportInput(): void {
+	if (regionImportInProgress) {
+		eda.sys_Dialog.showInformationMessage('导入窗口已打开或正在处理导入，请完成当前操作后再试。', '导入连接关系');
+		return;
+	}
+	regionImportInProgress = true;
 	void (async () => {
-		const importRequested = await openRegionImportInput();
-		if (importRequested) {
-			await runPersistentFullRegionConversion();
+		try {
+			const importRequested = await openRegionImportInput();
+			if (importRequested) {
+				await runPersistentFullRegionConversion();
+			}
+		}
+		catch (error) {
+			eda.sys_Dialog.showInformationMessage(error instanceof Error ? error.message : String(error), '导入连接关系失败');
+		}
+		finally {
+			regionImportInProgress = false;
 		}
 	})();
 }

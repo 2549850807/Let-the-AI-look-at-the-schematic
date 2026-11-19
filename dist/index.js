@@ -66,7 +66,7 @@ var edaEsbuildExportName = (() => {
     uuid: "a0e032396e0443d8980e74d9c547a4ef",
     displayName: "\u8BA9AI\u770B\u770B\u4F60\u7684\u539F\u7406\u56FE",
     description: "\u672C\u63D2\u4EF6\u63D0\u4F9B\u8BA9AI\u8FDB\u884C\u539F\u7406\u56FE\u8BBE\u8BA1\u3001\u5206\u6790\u3001\u4FEE\u6539\u7684\u80FD\u529B\uFF0C\u652F\u6301\u5305\u62EC\u7F51\u9875\u7248\u5728\u5185\u7684\u4EFB\u610FAI\u5DE5\u5177\u3002",
-    version: "1.1.26",
+    version: "1.1.34",
     publisher: "Yt\u79BE\u6597rY",
     engines: {
       eda: "^4.2.0"
@@ -235,17 +235,36 @@ var edaEsbuildExportName = (() => {
   function showInfo(content, title = "\u9636\u6BB5 0 SDK \u63A2\u9488") {
     eda.sys_Dialog.showInformationMessage(content, title);
   }
-  async function runProbe(title, action) {
+  async function runProbe(title, action, loadingTitle) {
+    let loading = false;
+    const finishLoading = () => {
+      if (loading) {
+        loading = false;
+        eda.sys_LoadingAndProgressBar.destroyProgressBar();
+      }
+    };
     try {
+      if (loadingTitle) {
+        loading = true;
+        eda.sys_LoadingAndProgressBar.showProgressBar(void 0, loadingTitle);
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+      }
       await ensureProbeEventLog();
       await appendProbeEvent(`${title}: menu started`);
-      await action();
+      await action(finishLoading);
       await appendProbeEvent(`${title}: menu completed`);
     } catch (error) {
+      finishLoading();
       console.error(`[${title}]`, error);
       const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-      await appendProbeEvent(`${title}: menu failed - ${message}`);
+      try {
+        await appendProbeEvent(`${title}: menu failed - ${message}`);
+      } catch (logError) {
+        console.error(`[${title}] \u65E0\u6CD5\u4FDD\u5B58\u9519\u8BEF\u65E5\u5FD7`, logError);
+      }
       showInfo(message, `${title}\u5931\u8D25`);
+    } finally {
+      finishLoading();
     }
   }
   function confirmAction(content, title) {
@@ -829,14 +848,15 @@ var edaEsbuildExportName = (() => {
     })();
   }
   async function exportRegionStructure() {
-    await runProbe("\u533A\u57DF\u7ED3\u6784\u5BFC\u51FA", async () => {
+    await runProbe("\u533A\u57DF\u7ED3\u6784\u5BFC\u51FA", async (finishLoading) => {
       const snapshot = await buildCurrentRegionSnapshot();
       await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, snapshot);
+      finishLoading();
       await showPreview("\u539F\u7406\u56FE\u7ED3\u6784\u6587\u672C\u6865\uFF1A\u5BFC\u51FA\u8FDE\u63A5\u5173\u7CFB", [
         jsonPreviewTab("\u533A\u57DF\u7ED3\u6784 JSON", snapshot.region),
         jsonPreviewTab("\u5BFC\u51FA\u8BCA\u65AD", snapshot.diagnostics)
       ]);
-    });
+    }, "\u6B63\u5728\u52A0\u8F7D\u8FDE\u63A5\u5173\u7CFB\uFF0C\u8BF7\u7A0D\u5019\u2026");
   }
 
   // src/ai-guide.ts
@@ -1070,17 +1090,18 @@ ${connectionJsonPlaceholder}
     }
   }
   async function showAiGuide() {
-    await runProbe("\u4E0EAI\u8054\u52A8", async () => {
+    await runProbe("\u4E0EAI\u8054\u52A8", async (finishLoading) => {
       const connectionJson = await currentSelectionConnectionJson();
       const analysisPrompt = analysisPromptTemplate.replace(connectionJsonPlaceholder, () => connectionJson);
       const modificationPrompt = modificationPromptTemplate.replace(connectionJsonPlaceholder, () => connectionJson);
+      finishLoading();
       await showPreview("\u8BA9AI\u770B\u770B\u4F60\u7684\u539F\u7406\u56FE\uFF1A\u4E0EAI\u8054\u52A8", [
         { label: "\u8BA9 AI \u8BBE\u8BA1", content: designPrompt },
         { label: "\u8BA9 AI \u5206\u6790", content: analysisPrompt },
         { label: "\u8BA9 AI \u4FEE\u6539", content: modificationPrompt },
         { label: "\u683C\u5F0F\u542B\u4E49", content: formatDescription }
       ]);
-    });
+    }, "\u6B63\u5728\u52A0\u8F7D AI \u8054\u52A8\u5185\u5BB9\uFF0C\u8BF7\u7A0D\u5019\u2026");
   }
 
   // src/netlist-diagnostic.ts
@@ -1696,6 +1717,50 @@ ${connectionJsonPlaceholder}
   function isRecord(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
+  function isRegionExportRoot(value) {
+    return isRecord(value) && value.format === "jlc-schematic-region";
+  }
+  function parseJsonObject(value) {
+    try {
+      const parsed = JSON.parse(value);
+      return isRecord(parsed) ? parsed : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  function extractRegionJsonText(raw) {
+    const text2 = raw.replace(/^\uFEFF/, "").trim();
+    if (!text2) {
+      return void 0;
+    }
+    if (isRegionExportRoot(parseJsonObject(text2))) {
+      return text2;
+    }
+    let cursor = 0;
+    while (cursor < text2.length) {
+      const opening = text2.indexOf("```", cursor);
+      if (opening < 0) {
+        break;
+      }
+      const lineEnd = text2.indexOf("\n", opening + 3);
+      if (lineEnd < 0) {
+        break;
+      }
+      const language = text2.slice(opening + 3, lineEnd).trim().toLowerCase();
+      const closing = text2.indexOf("```", lineEnd + 1);
+      if (closing < 0) {
+        break;
+      }
+      if (!language || language === "json") {
+        const candidate = text2.slice(lineEnd + 1, closing).trim();
+        if (isRegionExportRoot(parseJsonObject(candidate))) {
+          return candidate;
+        }
+      }
+      cursor = closing + 3;
+    }
+    return void 0;
+  }
   function stringValue(value) {
     return typeof value === "string" && value.trim() ? value.trim() : void 0;
   }
@@ -1858,7 +1923,11 @@ ${connectionJsonPlaceholder}
     const ignoredFields = [];
     let parsed;
     try {
-      parsed = JSON.parse(raw);
+      const jsonText = extractRegionJsonText(raw);
+      if (!jsonText) {
+        throw new Error("\u672A\u627E\u5230 jlc-schematic-region JSON\u3002\u8BF7\u7C98\u8D34\u7EAF JSON\uFF0C\u6216\u5305\u542B\u5B8C\u6574 JSON \u4EE3\u7801\u5757\u7684 AI \u56DE\u590D\u3002");
+      }
+      parsed = JSON.parse(jsonText);
     } catch (error) {
       issues.push({ level: "blocker", code: "INVALID_JSON", message: `JSON \u89E3\u6790\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}` });
       return { issues, ignoredFields };
@@ -2009,54 +2078,114 @@ ${connectionJsonPlaceholder}
   }
   async function openRegionImportInput() {
     let importRequested = false;
-    await runProbe("\u533A\u57DF\u7ED3\u6784\u6587\u672C\u8F93\u5165", async () => {
+    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await runProbe("\u533A\u57DF\u7ED3\u6784\u6587\u672C\u8F93\u5165", async (finishLoading) => {
       const currentSnapshot = await buildCurrentRegionSnapshot();
       const snapshotSaved = await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, currentSnapshot);
       if (!snapshotSaved) {
         throw new Error("\u65E0\u6CD5\u4FDD\u5B58\u5F53\u524D\u6846\u9009\u5FEB\u7167\uFF0C\u5DF2\u963B\u6B62\u5BFC\u5165\u3002");
       }
-      await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, "");
-      const actionCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, "");
+      const textCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, "");
+      if (!textCleared) {
+        throw new Error("\u65E0\u6CD5\u521D\u59CB\u5316\u5BFC\u5165\u6587\u672C\uFF0C\u5DF2\u963B\u6B62\u5BFC\u5165\u3002");
+      }
+      const actionCleared = await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, { sessionId, status: "ready" });
       if (!actionCleared) {
         throw new Error("\u65E0\u6CD5\u521D\u59CB\u5316\u5BFC\u5165\u7A97\u53E3\uFF0C\u5DF2\u963B\u6B62\u5BFC\u5165\u3002");
       }
       if (await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID)) {
         await eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID);
       }
-      const opened = await eda.sys_IFrame.openIFrame("/iframe/import.html", 920, 680, IMPORT_IFRAME_ID, {
+      let opened;
+      let openError;
+      let cancelled = false;
+      finishLoading();
+      void eda.sys_IFrame.openIFrame("/iframe/import.html", 920, 680, IMPORT_IFRAME_ID, {
         maximizeButton: true,
         minimizeButton: true,
         grayscaleMask: false,
-        title: "\u539F\u7406\u56FE\u7ED3\u6784\u6587\u672C\u6865\uFF1A\u7C98\u8D34\u533A\u57DF\u7ED3\u6784 JSON"
+        title: "\u539F\u7406\u56FE\u7ED3\u6784\u6587\u672C\u6865\uFF1A\u7C98\u8D34\u533A\u57DF\u7ED3\u6784 JSON",
+        onBeforeCloseCallFn: () => {
+          cancelled = true;
+          return true;
+        },
+        buttonCallbackFn: (button) => {
+          if (button === "close") {
+            cancelled = true;
+          }
+        }
+      }).then((result) => {
+        opened = result;
+      }, (error) => {
+        openError = error instanceof Error ? error.message : String(error);
       });
-      if (!opened) {
-        throw new Error("\u7ED3\u6784 JSON \u8F93\u5165\u7A97\u53E3\u6253\u5F00\u5931\u8D25\u3002");
-      }
       let observedOpenWindow = false;
       let consecutiveClosedSamples = 0;
       for (let sampleIndex = 0; sampleIndex < 14400; sampleIndex += 1) {
-        const action = eda.sys_Storage.getExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY);
-        if (action === "import") {
-          importRequested = true;
-          await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, "");
-          if (await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID)) {
-            await eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID);
-          }
+        if (cancelled) {
           break;
         }
+        const action = eda.sys_Storage.getExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY);
+        if (!isRecord(action) || action.sessionId !== sessionId) {
+          break;
+        }
+        if (isRecord(action) && action.sessionId === sessionId && action.status === "requested") {
+          try {
+            if (typeof action.requestedAt !== "number" || !Number.isFinite(action.requestedAt) || Date.now() - action.requestedAt > 15e3) {
+              throw new Error("\u5BFC\u5165\u8BF7\u6C42\u5DF2\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u201C\u5BFC\u5165\u8FDE\u63A5\u5173\u7CFB\u201D\u540E\u518D\u8BD5\u3002");
+            }
+            if (typeof action.text !== "string" || !action.text.trim()) {
+              throw new Error("\u5BFC\u5165\u8BF7\u6C42\u4E2D\u6CA1\u6709\u8FDE\u63A5\u5173\u7CFB\u6587\u672C\u3002");
+            }
+            if (!await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, action.text)) {
+              throw new Error("\u4FDD\u5B58\u5BFC\u5165\u6587\u672C\u5931\u8D25\u3002");
+            }
+            if (!await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, {
+              sessionId,
+              status: "accepted"
+            })) {
+              throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5BFC\u5165\u8BF7\u6C42\uFF0C\u5DF2\u505C\u6B62\u5BFC\u5165\u3002");
+            }
+            void Promise.resolve().then(() => eda.sys_IFrame.closeIFrame(IMPORT_IFRAME_ID)).catch((error) => {
+              console.error("\u5173\u95ED\u5BFC\u5165\u7A97\u53E3\u5931\u8D25", error);
+            });
+            importRequested = true;
+            break;
+          } catch (error) {
+            try {
+              await eda.sys_Storage.setExtensionUserConfig(IMPORT_ACTION_STORAGE_KEY, {
+                sessionId,
+                status: "failed",
+                message: error instanceof Error ? error.message : String(error)
+              });
+            } catch (storageError) {
+              console.error("\u65E0\u6CD5\u4FDD\u5B58\u5BFC\u5165\u5931\u8D25\u72B6\u6001", storageError);
+            }
+            throw error;
+          }
+        }
+        if (openError !== void 0 || opened === false) {
+          throw new Error(`\u7ED3\u6784 JSON \u8F93\u5165\u7A97\u53E3\u6253\u5F00\u5931\u8D25\u3002${openError ?? ""}`);
+        }
         const windowOpen = await eda.sys_IFrame.isIFrameAlreadyExist(IMPORT_IFRAME_ID);
+        if (cancelled) {
+          break;
+        }
         if (windowOpen) {
           observedOpenWindow = true;
           consecutiveClosedSamples = 0;
         } else {
           consecutiveClosedSamples += 1;
-          if (observedOpenWindow && consecutiveClosedSamples >= 4 || !observedOpenWindow && sampleIndex >= 12) {
+          if (observedOpenWindow && consecutiveClosedSamples >= 4) {
             break;
+          }
+          if (!observedOpenWindow && sampleIndex >= 120) {
+            throw new Error("\u5BFC\u5165\u7A97\u53E3\u52A0\u8F7D\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u201C\u5BFC\u5165\u8FDE\u63A5\u5173\u7CFB\u201D\u3002");
           }
         }
         await new Promise((resolve) => globalThis.setTimeout(resolve, 250));
       }
-    });
+    }, "\u6B63\u5728\u52A0\u8F7D\u5BFC\u5165\u7A97\u53E3\uFF0C\u8BF7\u7A0D\u5019\u2026");
     return importRequested;
   }
   async function runRegionImportPreflight() {
@@ -2447,7 +2576,23 @@ ${connectionJsonPlaceholder}
       }
       const preservedWireIds = reachableWireIds(selectedInsideWires, anchorSeedWireIds);
       const deletableInsideWires = selectedInsideWires.filter((geometry) => !preservedWireIds.has(geometry.primitiveId));
+      const pinContexts = await buildPinContexts(selectedComponents);
+      const pinIds = new Set([...pinContexts.values()].map((context) => safePrimitiveId(context.pin)).filter((id) => Boolean(id)));
+      for (const component of selected.filter(isComponent)) {
+        if (component.getState_ComponentType() === ESCH_PrimitiveComponentType.COMPONENT || component.getState_ComponentType() === ESCH_PrimitiveComponentType.DRAWING) {
+          continue;
+        }
+        const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(component.getState_PrimitiveId()) ?? [];
+        for (const pin of pins) {
+          const pinId = safePrimitiveId(pin);
+          if (pinId) {
+            pinIds.add(pinId);
+          }
+        }
+      }
+      const wireGeometryById = new Map(wireGeometries.map((geometry) => [geometry.primitiveId, geometry]));
       const attributeConflicts = [];
+      const attributeInspection = [];
       if (boundary) {
         for (const attribute of await eda.sch_PrimitiveAttribute.getAll()) {
           const x = attribute.getState_X();
@@ -2456,18 +2601,28 @@ ${connectionJsonPlaceholder}
             continue;
           }
           const parentPrimitiveId = attribute.getState_ParentPrimitiveId();
-          if (parentPrimitiveId && allComponentIds.has(parentPrimitiveId)) {
-            continue;
-          }
-          attributeConflicts.push({
+          const parentWire = wireGeometryById.get(parentPrimitiveId);
+          const parentType = allComponentIds.has(parentPrimitiveId) ? "component" : pinIds.has(parentPrimitiveId) ? "pin" : parentWire ? "wire" : "unknown";
+          const preserved = parentType === "component" || parentType === "pin" || parentWire?.classification === "outside" && !parentWire.selected;
+          const evidence = {
             primitiveId: attribute.getState_PrimitiveId(),
             parentPrimitiveId,
+            parentType,
+            parentWireClassification: parentWire?.classification,
             key: attribute.getState_Key(),
             value: attribute.getState_Value(),
+            keyVisible: attribute.getState_KeyVisible(),
+            valueVisible: attribute.getState_ValueVisible(),
             x,
-            y
-          });
-          issues.push(issue("blocker", "STANDALONE_ATTRIBUTE_IN_REGION", "\u533A\u57DF\u5185\u5B58\u5728\u6E38\u79BB\u5C5E\u6027\u6216\u53EF\u80FD\u7684\u666E\u901A\u7F51\u7EDC\u6807\u7B7E\uFF0C\u5F53\u524D\u7248\u672C\u65E0\u6CD5\u5B89\u5168\u533A\u5206\u3002", attribute.getState_PrimitiveId()));
+            y,
+            preserved
+          };
+          attributeInspection.push(evidence);
+          if (preserved) {
+            continue;
+          }
+          attributeConflicts.push(evidence);
+          issues.push(issue("blocker", "STANDALONE_ATTRIBUTE_IN_REGION", `\u533A\u57DF\u5185\u5C5E\u6027 ${evidence.key}=${evidence.value}\uFF08\u7236\u5BF9\u8C61 ${parentPrimitiveId || "(\u65E0)"}\uFF0C\u7C7B\u578B ${parentType}\uFF09\u53EF\u80FD\u662F\u7F51\u7EDC\u6807\u7B7E\uFF0C\u65E0\u6CD5\u5B89\u5168\u5904\u7406\uFF1B\u8BF7\u67E5\u770B\u201C\u5C5E\u6027\u5F52\u5C5E\u8BCA\u65AD\u201D\u3002`, evidence.primitiveId));
         }
       }
       const selectedUnsupportedPrimitives = selected.flatMap((primitive) => {
@@ -2480,7 +2635,6 @@ ${connectionJsonPlaceholder}
       if (selectedUnsupportedPrimitives.length > 0) {
         issues.push(issue("warning", "NON_ELECTRICAL_PRIMITIVES_SELECTED", `\u9009\u62E9\u4E2D\u5305\u542B ${selectedUnsupportedPrimitives.length} \u4E2A\u975E\u7535\u6C14\u56FE\u5143\uFF1B\u5B83\u4EEC\u4E0D\u4F1A\u8FDB\u5165\u4EFB\u4F55\u4FEE\u6539\u8BA1\u5212\u3002`));
       }
-      const pinContexts = await buildPinContexts(selectedComponents);
       const selectedWireNetById = new Map(selected.filter(isWire).map((wire) => [wire.getState_PrimitiveId(), wire.getState_Net()]));
       const localAliasByCanonicalNet = /* @__PURE__ */ new Map();
       for (const [member, canonicalNet] of currentNetByMember) {
@@ -2639,6 +2793,7 @@ ${connectionJsonPlaceholder}
         preservedMemberCount: preservedMembers.length,
         unselectedComponentConflictCount: unselectedComponentConflicts.length,
         attributeConflictCount: attributeConflicts.length,
+        preservedAttributeCount: attributeInspection.filter((attribute) => attribute.preserved).length,
         networkChangeCount: networkChanges.length,
         plannedDeleteWireCount: deletionPlan.length,
         plannedCreatePortCount: portPlans.length,
@@ -2665,6 +2820,7 @@ ${connectionJsonPlaceholder}
         warnings,
         information,
         networkChanges,
+        attributeInspection,
         networkAnchorNames: [...availableNetworkAnchorNames].sort(compareStrings2),
         ...report.planReady && portPlans[0] ? { target: portPlans[0] } : {}
       });
@@ -2673,6 +2829,7 @@ ${connectionJsonPlaceholder}
           jsonPreviewTab("\u9884\u68C0\u6458\u8981", report),
           jsonPreviewTab("\u963B\u6B62\u9879", blockers),
           jsonPreviewTab("\u8B66\u544A\u9879", warnings),
+          jsonPreviewTab("\u5C5E\u6027\u5F52\u5C5E\u8BCA\u65AD", attributeInspection),
           jsonPreviewTab("\u533A\u57DF\u8FB9\u754C\u4E0E\u56FE\u5143", {
             boundary,
             componentEnvelope,
@@ -3031,7 +3188,28 @@ ${connectionJsonPlaceholder}
     }
     return samples;
   }
-  async function captureMemberNetworkEvidence2(members, targetNet, delays) {
+  async function captureCreatedPortConnection(primitiveId, plan) {
+    try {
+      const port = await eda.sch_PrimitiveComponent.get(primitiveId);
+      const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(primitiveId) ?? [];
+      return {
+        primitiveId,
+        expectedNet: plan.connectionNet ?? plan.net,
+        expectedPoint: plan.targetPoint,
+        actualNet: port?.getState_Net(),
+        portOrigin: port ? { x: port.getState_X(), y: port.getState_Y() } : void 0,
+        pins: pins.map((pin) => ({
+          primitiveId: safePrimitiveId(pin),
+          x: pin.getState_X(),
+          y: pin.getState_Y(),
+          matchesExpectedPoint: Math.abs(pin.getState_X() - plan.targetPoint.x) <= 1e-3 && Math.abs(pin.getState_Y() - plan.targetPoint.y) <= 1e-3
+        }))
+      };
+    } catch (error) {
+      return { primitiveId, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  async function captureMemberNetworkEvidence2(members, targetNet, delays = [0, 100, 250, 500, 1e3, 2e3, 3e3]) {
     const evidence = [];
     let elapsed = 0;
     for (const milliseconds of delays) {
@@ -3056,7 +3234,7 @@ ${connectionJsonPlaceholder}
     }
     return evidence;
   }
-  async function captureExpectedMemberNetworkEvidence(expectedNetworks, delays) {
+  async function captureExpectedMemberNetworkEvidence(expectedNetworks, delays = [0, 100, 250, 500, 1e3, 2e3, 3e3]) {
     const members = Object.keys(expectedNetworks);
     const evidence = [];
     let elapsed = 0;
@@ -3511,7 +3689,7 @@ ${connectionJsonPlaceholder}
       }
     };
   }
-  function deriveStubPortOrientation(stubLine) {
+  function deriveStubPortOrientation(stubLine, portDirection) {
     if (stubLine.length < 4) {
       throw new Error("\u77ED\u5BFC\u7EBF\u51E0\u4F55\u6570\u636E\u4E0D\u5B8C\u6574\uFF0C\u65E0\u6CD5\u63A8\u5BFC\u7F51\u7EDC\u7AEF\u53E3\u65B9\u5411\u3002");
     }
@@ -3535,13 +3713,17 @@ ${connectionJsonPlaceholder}
       throw new Error("\u77ED\u5BFC\u7EBF\u65B9\u5411\u4E0D\u662F\u53D7\u652F\u6301\u7684\u6B63\u4EA4\u65B9\u5411\uFF0C\u65E0\u6CD5\u521B\u5EFA\u7F51\u7EDC\u7AEF\u53E3\u3002");
     }
     const isVertical = direction.x === 0;
+    const baseRotation = isVertical ? (stubWireRotation + 180) % 360 : stubWireRotation;
+    const inputRotationOffset = portDirection === "IN" ? 180 : 0;
     return {
       stubStartPoint: { x: startX, y: startY },
       stubEndPoint: { x: endX, y: endY },
       stubDirection: direction,
       stubWireRotation,
-      portRotation: isVertical ? (stubWireRotation + 180) % 360 : stubWireRotation,
-      mode: isVertical ? "vertical-reversed" : "horizontal-aligned"
+      portRotation: (baseRotation + inputRotationOffset) % 360,
+      portDirection,
+      inputRotationOffset,
+      mode: portDirection === "IN" ? "input-reversed" : isVertical ? "vertical-reversed" : "horizontal-aligned"
     };
   }
   async function createTrackedStubWire(line, snapshot, state) {
@@ -3872,6 +4054,30 @@ ${connectionJsonPlaceholder}
       ]);
     });
   }
+  async function supersedeCompletedPersistentImportRecoveryForNewImport(clearRecoveryState2 = true) {
+    const recoveryState = readBatchRecoveryState();
+    if (!recoveryState) {
+      return;
+    }
+    const state = recoveryState;
+    const isCompletedPersistentImport = state.purpose === "persistent-conversion" && Boolean(state.completedAt) && Boolean(state.convertedConnectivity) && Array.isArray(state.entries) && state.entries.every((entry) => entry.status === "applied") && (state.pinNoConnectChanges ?? []).every((change) => change.status === "applied");
+    if (!isCompletedPersistentImport) {
+      throw new Error(
+        "\u68C0\u6D4B\u5230\u672A\u5B8C\u6210\u7684\u5BFC\u5165\u72B6\u6001\u3002\u8BF7\u5148\u6267\u884C\u201C\u64A4\u56DE\u4E0A\u4E00\u6B21\u7684\u5BFC\u5165\u201D\uFF0C\u6216\u5148\u5904\u7406\u4E0A\u4E00\u6B21\u5BFC\u5165\u7684\u5F02\u5E38\u3002"
+      );
+    }
+    const currentConnectivity = await buildEnetConnectivitySnapshot();
+    const convertedConnectivity = state.convertedConnectivity;
+    const topologyUnchanged = currentConnectivity.canonicalHash === convertedConnectivity.canonicalHash && currentConnectivity.networkCount === convertedConnectivity.networkCount && currentConnectivity.connectedMemberCount === convertedConnectivity.connectedMemberCount;
+    if (!topologyUnchanged) {
+      throw new Error(
+        "\u68C0\u6D4B\u5230\u4E0A\u4E00\u6B21\u5BFC\u5165\u540E\u7684\u539F\u7406\u56FE\u8FDE\u63A5\u5173\u7CFB\u5DF2\u53D8\u5316\u3002\u4E3A\u907F\u514D\u8986\u76D6\u624B\u5DE5\u4FEE\u6539\uFF0C\u8BF7\u5148\u6267\u884C\u201C\u64A4\u56DE\u4E0A\u4E00\u6B21\u7684\u5BFC\u5165\u201D\u6216\u5904\u7406\u8BE5\u72B6\u6001\u3002"
+      );
+    }
+    if (clearRecoveryState2) {
+      await clearBatchRecoveryState();
+    }
+  }
   function assertNoActivePhase4RecoveryState() {
     if (readBatchRecoveryState()) {
       throw new Error("\u68C0\u6D4B\u5230\u5C1A\u672A\u64A4\u56DE\u7684\u5BFC\u5165\u72B6\u6001\u3002\u8BF7\u5148\u6267\u884C\u201C\u64A4\u56DE\u4E0A\u4E00\u6B21\u7684\u5BFC\u5165\u201D\u3002");
@@ -3916,7 +4122,7 @@ ${connectionJsonPlaceholder}
     const allTargetPoints = candidate.portPlans.map((plan) => plan.targetPoint);
     const stubPlans = candidate.portPlans.map((target) => {
       const { stubLine, derivation } = candidate.wirePlan && target.selectedWireIdsAtReportedPoint.includes(candidate.wirePlan.primitiveId) ? deriveStubLine(target, plannedLine, candidate.wirePlan.primitiveId, allTargetPoints) : deriveFloatingStubLine(target);
-      const orientation2 = deriveStubPortOrientation(stubLine);
+      const orientation2 = deriveStubPortOrientation(stubLine, target.direction);
       return {
         target,
         stubLine,
@@ -4019,7 +4225,7 @@ ${connectionJsonPlaceholder}
         const { primitiveId, nameVisibility } = await createTrackedPort(plan.stubPortPlan, state);
         createdPorts.push({ member: plan.target.member, primitiveId, nameVisibility });
         const verifiedMembers = stubPlans.slice(0, portIndex + 1).map((item) => item.target.member);
-        const samples = await captureMemberNetworkEvidence2(verifiedMembers, candidate.net, [0]);
+        const samples = await captureMemberNetworkEvidence2(verifiedMembers, candidate.net);
         const passed2 = samples.at(-1)?.passed === true;
         incrementalPortEvidence.push({
           portIndex,
@@ -4027,14 +4233,15 @@ ${connectionJsonPlaceholder}
           primitiveId,
           verifiedMembers,
           passed: passed2,
-          samples
+          samples,
+          ...!passed2 ? { portConnection: await captureCreatedPortConnection(primitiveId, plan.stubPortPlan) } : {}
         });
         if (!passed2) {
           throw new Error(`\u521B\u5EFA\u7AEF\u53E3 ${plan.target.member} \u540E\uFF0CENET \u672A\u786E\u8BA4\u5DF2\u521B\u5EFA\u7AEF\u53E3\u7684\u5168\u90E8\u6210\u5458\u8FDB\u5165\u7F51\u7EDC ${candidate.net}\u3002`);
         }
       }
       const allMembers = stubPlans.map((plan) => plan.target.member);
-      allMemberEvidence = await captureMemberNetworkEvidence2(allMembers, candidate.net, [0]);
+      allMemberEvidence = await captureMemberNetworkEvidence2(allMembers, candidate.net);
       if (!allMemberEvidence.at(-1)?.passed) {
         throw new Error(`\u5168\u90E8\u77ED\u6869\u7AEF\u53E3\u521B\u5EFA\u540E\uFF0CENET \u672A\u786E\u8BA4 ${allMembers.length} \u4E2A\u6210\u5458\u7EDF\u4E00\u8FDB\u5165\u7F51\u7EDC ${candidate.net}\u3002`);
       }
@@ -4384,7 +4591,7 @@ ${connectionJsonPlaceholder}
               createdPorts.push({ member: plan.target.member, primitiveId, nameVisibility });
               await writeBatchRecoveryState(batchState);
               const verifiedMembers = stubPlans.slice(0, portIndex + 1).map((item) => item.target.member);
-              const samples = await captureMemberNetworkEvidence2(verifiedMembers, candidate.net, [0]);
+              const samples = await captureMemberNetworkEvidence2(verifiedMembers, candidate.net);
               const passed2 = samples.at(-1)?.passed === true;
               incrementalPortEvidence.push({
                 portIndex,
@@ -4392,7 +4599,8 @@ ${connectionJsonPlaceholder}
                 primitiveId,
                 verifiedMembers,
                 passed: passed2,
-                samples
+                samples,
+                ...!passed2 ? { portConnection: await captureCreatedPortConnection(primitiveId, plan.stubPortPlan) } : {}
               });
               if (!passed2) {
                 throw new Error(`\u521B\u5EFA\u7AEF\u53E3 ${plan.target.member} \u540E\uFF0CENET \u672A\u786E\u8BA4\u5DF2\u521B\u5EFA\u7AEF\u53E3\u7684\u5168\u90E8\u6210\u5458\u8FDB\u5165\u7F51\u7EDC ${candidate.net}\u3002`);
@@ -4400,8 +4608,7 @@ ${connectionJsonPlaceholder}
             }
             allMemberEvidence = await captureMemberNetworkEvidence2(
               stubPlans.map((plan) => plan.target.member),
-              candidate.net,
-              [0]
+              candidate.net
             );
             if (!allMemberEvidence.at(-1)?.passed) {
               throw new Error(`\u7F51\u7EDC ${candidate.net} \u7684\u5168\u90E8\u6210\u5458\u8FDE\u63A5\u9A8C\u8BC1\u5931\u8D25\u3002`);
@@ -4435,7 +4642,7 @@ ${connectionJsonPlaceholder}
         }
         if (!sequenceError && batchState.entries.length === candidates.length && batchState.entries.every((entry) => entry.status === "applied")) {
           const expectedNetworks = Object.fromEntries(storedPlan.portPlans.map((plan) => [plan.member, plan.net]));
-          finalMemberEvidence = Object.keys(expectedNetworks).length > 0 ? await captureExpectedMemberNetworkEvidence(expectedNetworks, [0]) : [{ elapsedMs: 0, networks: {}, expectedNetworks: {}, passed: true, capturedAt: now() }];
+          finalMemberEvidence = Object.keys(expectedNetworks).length > 0 ? await captureExpectedMemberNetworkEvidence(expectedNetworks) : [{ elapsedMs: 0, networks: {}, expectedNetworks: {}, passed: true, capturedAt: now() }];
           const pinNoConnectApplied = (batchState.pinNoConnectChanges ?? []).every((change) => change.applied);
           if (!finalMemberEvidence.at(-1)?.passed || !pinNoConnectApplied) {
             sequenceError = "\u5B8C\u6574\u533A\u57DF\u7AEF\u53E3\u521B\u5EFA\u540E\uFF0C\u5168\u90E8\u8BA1\u5212\u6210\u5458\u672A\u540C\u65F6\u8FDB\u5165\u76EE\u6807\u7F51\u7EDC\u3002";
@@ -4526,7 +4733,7 @@ ${connectionJsonPlaceholder}
   }
   async function runPersistentFullRegionConversion() {
     await runProbe("\u81EA\u52A8\u9884\u68C0\u5E76\u6B63\u5F0F\u8F6C\u6362\u5DF2\u7C98\u8D34\u6587\u672C", async () => {
-      assertNoActivePhase4RecoveryState();
+      await supersedeCompletedPersistentImportRecoveryForNewImport(false);
       await runWireConflictPreflight({ showPreview: false });
       const storedPlan = readStoredPhase3Plan2();
       if (!storedPlan?.planReady || storedPlan.blockerCount !== 0) {
@@ -4538,6 +4745,7 @@ ${connectionJsonPlaceholder}
           }),
           jsonPreviewTab("\u963B\u6B62\u9879", storedPlan?.blockers ?? []),
           jsonPreviewTab("\u8B66\u544A\u9879", storedPlan?.warnings ?? []),
+          jsonPreviewTab("\u5C5E\u6027\u5F52\u5C5E\u8BCA\u65AD", storedPlan?.attributeInspection ?? []),
           jsonPreviewTab("\u7F51\u7EDC\u53D8\u5316", storedPlan?.networkChanges ?? [])
         ]);
         return;
@@ -4557,6 +4765,7 @@ ${connectionJsonPlaceholder}
         ]);
         return;
       }
+      await supersedeCompletedPersistentImportRecoveryForNewImport();
       await runFullRegionStubPortRollbackProbe({
         previewTitle: "\u539F\u7406\u56FE\u7ED3\u6784\u6587\u672C\u6865\uFF1A\u5BFC\u5165\u8FDE\u63A5\u5173\u7CFB\u7ED3\u679C",
         retainConversion: true
@@ -4564,7 +4773,11 @@ ${connectionJsonPlaceholder}
     });
   }
   async function prepareCurrentSelectionPlan(mode) {
-    assertNoActivePhase4RecoveryState();
+    if (mode === "one-click-persistent-conversion") {
+      await supersedeCompletedPersistentImportRecoveryForNewImport(false);
+    } else {
+      assertNoActivePhase4RecoveryState();
+    }
     const snapshot = await buildCurrentRegionSnapshot();
     await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, snapshot);
     await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, JSON.stringify(snapshot.region, null, 2));
@@ -4608,6 +4821,7 @@ ${connectionJsonPlaceholder}
   async function runOneClickPersistentConversion() {
     await runProbe("\u4E00\u952E\u6B63\u5F0F\u8F6C\u6362\u5F53\u524D\u6846\u9009", async () => {
       const preparation = await prepareCurrentSelectionPlan("one-click-persistent-conversion");
+      await supersedeCompletedPersistentImportRecoveryForNewImport();
       await runFullRegionStubPortRollbackProbe({
         oneClickContext: preparation.context,
         retainConversion: true
@@ -5585,11 +5799,23 @@ ${connectionJsonPlaceholder}
   function phase1ExportRegionStructure() {
     void exportRegionStructure();
   }
+  var regionImportInProgress = false;
   function phase2OpenRegionImportInput() {
+    if (regionImportInProgress) {
+      eda.sys_Dialog.showInformationMessage("\u5BFC\u5165\u7A97\u53E3\u5DF2\u6253\u5F00\u6216\u6B63\u5728\u5904\u7406\u5BFC\u5165\uFF0C\u8BF7\u5B8C\u6210\u5F53\u524D\u64CD\u4F5C\u540E\u518D\u8BD5\u3002", "\u5BFC\u5165\u8FDE\u63A5\u5173\u7CFB");
+      return;
+    }
+    regionImportInProgress = true;
     void (async () => {
-      const importRequested = await openRegionImportInput();
-      if (importRequested) {
-        await runPersistentFullRegionConversion();
+      try {
+        const importRequested = await openRegionImportInput();
+        if (importRequested) {
+          await runPersistentFullRegionConversion();
+        }
+      } catch (error) {
+        eda.sys_Dialog.showInformationMessage(error instanceof Error ? error.message : String(error), "\u5BFC\u5165\u8FDE\u63A5\u5173\u7CFB\u5931\u8D25");
+      } finally {
+        regionImportInProgress = false;
       }
     })();
   }

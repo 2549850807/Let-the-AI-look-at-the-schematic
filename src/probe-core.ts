@@ -172,18 +172,39 @@ export function showInfo(content: string, title = '阶段 0 SDK 探针'): void {
 	eda.sys_Dialog.showInformationMessage(content, title);
 }
 
-export async function runProbe(title: string, action: () => Promise<void>): Promise<void> {
+export async function runProbe(title: string, action: (finishLoading: () => void) => Promise<void>, loadingTitle?: string): Promise<void> {
+	let loading = false;
+	const finishLoading = (): void => {
+		if (loading) {
+			loading = false;
+			eda.sys_LoadingAndProgressBar.destroyProgressBar();
+		}
+	};
 	try {
+		if (loadingTitle) {
+			loading = true;
+			eda.sys_LoadingAndProgressBar.showProgressBar(undefined, loadingTitle);
+			await new Promise(resolve => globalThis.setTimeout(resolve, 0));
+		}
 		await ensureProbeEventLog();
 		await appendProbeEvent(`${title}: menu started`);
-		await action();
+		await action(finishLoading);
 		await appendProbeEvent(`${title}: menu completed`);
 	}
 	catch (error) {
+		finishLoading();
 		console.error(`[${title}]`, error);
 		const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-		await appendProbeEvent(`${title}: menu failed - ${message}`);
+		try {
+			await appendProbeEvent(`${title}: menu failed - ${message}`);
+		}
+		catch (logError) {
+			console.error(`[${title}] 无法保存错误日志`, logError);
+		}
 		showInfo(message, `${title}失败`);
+	}
+	finally {
+		finishLoading();
 	}
 }
 

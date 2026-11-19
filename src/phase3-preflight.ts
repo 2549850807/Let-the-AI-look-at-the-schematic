@@ -107,6 +107,7 @@ export interface StoredPhase3Plan {
 	information?: Array<InspectionIssue>;
 	networkChanges?: Array<Record<string, string>>;
 	networkAnchorNames?: Array<string>;
+	attributeInspection?: Array<Record<string, unknown>>;
 	target?: PortPlan;
 }
 
@@ -493,7 +494,24 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 		}
 		const preservedWireIds = reachableWireIds(selectedInsideWires, anchorSeedWireIds);
 		const deletableInsideWires = selectedInsideWires.filter(geometry => !preservedWireIds.has(geometry.primitiveId));
+		const pinContexts = await buildPinContexts(selectedComponents);
+		const pinIds = new Set([...pinContexts.values()].map(context => safePrimitiveId(context.pin)).filter((id): id is string => Boolean(id)));
+		for (const component of selected.filter(isComponent)) {
+			if (component.getState_ComponentType() === ESCH_PrimitiveComponentType.COMPONENT
+				|| component.getState_ComponentType() === ESCH_PrimitiveComponentType.DRAWING) {
+				continue;
+			}
+			const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(component.getState_PrimitiveId()) ?? [];
+			for (const pin of pins) {
+				const pinId = safePrimitiveId(pin);
+				if (pinId) {
+					pinIds.add(pinId);
+				}
+			}
+		}
+		const wireGeometryById = new Map(wireGeometries.map(geometry => [geometry.primitiveId, geometry]));
 		const attributeConflicts: Array<Record<string, unknown>> = [];
+		const attributeInspection: Array<Record<string, unknown>> = [];
 		if (boundary) {
 			for (const attribute of await eda.sch_PrimitiveAttribute.getAll()) {
 				const x = attribute.getState_X();
@@ -502,18 +520,31 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 					continue;
 				}
 				const parentPrimitiveId = attribute.getState_ParentPrimitiveId();
-				if (parentPrimitiveId && allComponentIds.has(parentPrimitiveId)) {
-					continue;
-				}
-				attributeConflicts.push({
+				const parentWire = wireGeometryById.get(parentPrimitiveId);
+				const parentType = allComponentIds.has(parentPrimitiveId)
+					? 'component'
+					: pinIds.has(parentPrimitiveId) ? 'pin' : parentWire ? 'wire' : 'unknown';
+				const preserved = parentType === 'component' || parentType === 'pin'
+					|| (parentWire?.classification === 'outside' && !parentWire.selected);
+				const evidence = {
 					primitiveId: attribute.getState_PrimitiveId(),
 					parentPrimitiveId,
+					parentType,
+					parentWireClassification: parentWire?.classification,
 					key: attribute.getState_Key(),
 					value: attribute.getState_Value(),
+					keyVisible: attribute.getState_KeyVisible(),
+					valueVisible: attribute.getState_ValueVisible(),
 					x,
 					y,
-				});
-				issues.push(issue('blocker', 'STANDALONE_ATTRIBUTE_IN_REGION', '区域内存在游离属性或可能的普通网络标签，当前版本无法安全区分。', attribute.getState_PrimitiveId()));
+					preserved,
+				};
+				attributeInspection.push(evidence);
+				if (preserved) {
+					continue;
+				}
+				attributeConflicts.push(evidence);
+				issues.push(issue('blocker', 'STANDALONE_ATTRIBUTE_IN_REGION', `区域内属性 ${evidence.key}=${evidence.value}（父对象 ${parentPrimitiveId || '(无)'}，类型 ${parentType}）可能是网络标签，无法安全处理；请查看“属性归属诊断”。`, evidence.primitiveId));
 			}
 		}
 
@@ -528,7 +559,6 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 			issues.push(issue('warning', 'NON_ELECTRICAL_PRIMITIVES_SELECTED', `选择中包含 ${selectedUnsupportedPrimitives.length} 个非电气图元；它们不会进入任何修改计划。`));
 		}
 
-		const pinContexts = await buildPinContexts(selectedComponents);
 		const selectedWireNetById = new Map(selected.filter(isWire).map(wire => [wire.getState_PrimitiveId(), wire.getState_Net()]));
 		const localAliasByCanonicalNet = new Map<string, string>();
 		for (const [member, canonicalNet] of currentNetByMember) {
@@ -715,6 +745,7 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 			preservedMemberCount: preservedMembers.length,
 			unselectedComponentConflictCount: unselectedComponentConflicts.length,
 			attributeConflictCount: attributeConflicts.length,
+			preservedAttributeCount: attributeInspection.filter(attribute => attribute.preserved).length,
 			networkChangeCount: networkChanges.length,
 			plannedDeleteWireCount: deletionPlan.length,
 			plannedCreatePortCount: portPlans.length,
@@ -743,6 +774,7 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 			warnings,
 			information,
 			networkChanges,
+			attributeInspection,
 			networkAnchorNames: [...availableNetworkAnchorNames].sort(compareStrings),
 			...(report.planReady && portPlans[0] ? { target: portPlans[0] } : {}),
 		} satisfies StoredPhase3Plan);
@@ -752,6 +784,7 @@ export async function runWireConflictPreflight(options: { showPreview?: boolean;
 				jsonPreviewTab('预检摘要', report),
 				jsonPreviewTab('阻止项', blockers),
 				jsonPreviewTab('警告项', warnings),
+				jsonPreviewTab('属性归属诊断', attributeInspection),
 				jsonPreviewTab('区域边界与图元', {
 					boundary,
 					componentEnvelope,

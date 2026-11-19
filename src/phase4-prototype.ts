@@ -172,7 +172,9 @@ interface StubPortOrientationEvidence {
 	stubDirection: { x: number; y: number };
 	stubWireRotation: number;
 	portRotation: number;
-	mode: 'horizontal-aligned' | 'vertical-reversed';
+	portDirection: PortPlan['direction'];
+	inputRotationOffset: number;
+	mode: 'horizontal-aligned' | 'vertical-reversed' | 'input-reversed';
 }
 
 interface StubCreationEvidence {
@@ -203,6 +205,7 @@ interface IncrementalPortConnectivityEvidence {
 	verifiedMembers: Array<string>;
 	passed: boolean;
 	samples: Array<MemberNetworkEvidence>;
+	portConnection?: Record<string, unknown>;
 }
 
 type WirePresenceStatus = 'present' | 'absent' | 'ambiguous';
@@ -438,10 +441,34 @@ async function captureNetlistHashSamples(delays: Array<number>): Promise<Array<N
 	return samples;
 }
 
+async function captureCreatedPortConnection(primitiveId: string, plan: PortPlan): Promise<Record<string, unknown>> {
+	try {
+		const port = await eda.sch_PrimitiveComponent.get(primitiveId);
+		const pins = await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(primitiveId) ?? [];
+		return {
+			primitiveId,
+			expectedNet: plan.connectionNet ?? plan.net,
+			expectedPoint: plan.targetPoint,
+			actualNet: port?.getState_Net(),
+			portOrigin: port ? { x: port.getState_X(), y: port.getState_Y() } : undefined,
+			pins: pins.map(pin => ({
+				primitiveId: safePrimitiveId(pin),
+				x: pin.getState_X(),
+				y: pin.getState_Y(),
+				matchesExpectedPoint: Math.abs(pin.getState_X() - plan.targetPoint.x) <= 0.001
+					&& Math.abs(pin.getState_Y() - plan.targetPoint.y) <= 0.001,
+			})),
+		};
+	}
+	catch (error) {
+		return { primitiveId, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 async function captureMemberNetworkEvidence(
 	members: Array<string>,
 	targetNet: string,
-	delays: Array<number>,
+	delays: Array<number> = [0, 100, 250, 500, 1000, 2000, 3000],
 ): Promise<Array<MemberNetworkEvidence>> {
 	const evidence: Array<MemberNetworkEvidence> = [];
 	let elapsed = 0;
@@ -471,7 +498,7 @@ async function captureMemberNetworkEvidence(
 
 async function captureExpectedMemberNetworkEvidence(
 	expectedNetworks: Record<string, string>,
-	delays: Array<number>,
+	delays: Array<number> = [0, 100, 250, 500, 1000, 2000, 3000],
 ): Promise<Array<ExpectedMemberNetworkEvidence>> {
 	const members = Object.keys(expectedNetworks);
 	const evidence: Array<ExpectedMemberNetworkEvidence> = [];
@@ -1010,7 +1037,7 @@ function deriveFloatingStubLine(target: PortPlan): { stubLine: Array<number>; de
 	};
 }
 
-function deriveStubPortOrientation(stubLine: Array<number>): StubPortOrientationEvidence {
+function deriveStubPortOrientation(stubLine: Array<number>, portDirection: PortPlan['direction']): StubPortOrientationEvidence {
 	if (stubLine.length < 4) {
 		throw new Error('短导线几何数据不完整，无法推导网络端口方向。');
 	}
@@ -1034,13 +1061,17 @@ function deriveStubPortOrientation(stubLine: Array<number>): StubPortOrientation
 		throw new Error('短导线方向不是受支持的正交方向，无法创建网络端口。');
 	}
 	const isVertical = direction.x === 0;
+	const baseRotation = isVertical ? (stubWireRotation + 180) % 360 : stubWireRotation;
+	const inputRotationOffset = portDirection === 'IN' ? 180 : 0;
 	return {
 		stubStartPoint: { x: startX, y: startY },
 		stubEndPoint: { x: endX, y: endY },
 		stubDirection: direction,
 		stubWireRotation,
-		portRotation: isVertical ? (stubWireRotation + 180) % 360 : stubWireRotation,
-		mode: isVertical ? 'vertical-reversed' : 'horizontal-aligned',
+		portRotation: (baseRotation + inputRotationOffset) % 360,
+		portDirection,
+		inputRotationOffset,
+		mode: portDirection === 'IN' ? 'input-reversed' : isVertical ? 'vertical-reversed' : 'horizontal-aligned',
 	};
 }
 
@@ -1418,6 +1449,55 @@ export async function runSingleNetworkPrototype(): Promise<void> {
 	});
 }
 
+async function supersedeCompletedPersistentImportRecoveryForNewImport(clearRecoveryState = true): Promise<void> {
+	const recoveryState = readBatchRecoveryState();
+	if (!recoveryState) {
+		return;
+	}
+
+	const state = recoveryState as unknown as {
+		purpose?: string;
+		completedAt?: unknown;
+		convertedConnectivity?: {
+			canonicalHash?: string;
+			networkCount?: number;
+			connectedMemberCount?: number;
+		};
+		entries?: Array<{ status?: string }>;
+		pinNoConnectChanges?: Array<{ status?: string }>;
+	};
+	const isCompletedPersistentImport
+		= state.purpose === 'persistent-conversion'
+			&& Boolean(state.completedAt)
+			&& Boolean(state.convertedConnectivity)
+			&& Array.isArray(state.entries)
+			&& state.entries.every(entry => entry.status === 'applied')
+			&& (state.pinNoConnectChanges ?? []).every(change => change.status === 'applied');
+
+	if (!isCompletedPersistentImport) {
+		throw new Error(
+			'检测到未完成的导入状态。请先执行“撤回上一次的导入”，或先处理上一次导入的异常。',
+		);
+	}
+
+	const currentConnectivity = await buildEnetConnectivitySnapshot();
+	const convertedConnectivity = state.convertedConnectivity!;
+	const topologyUnchanged
+		= currentConnectivity.canonicalHash === convertedConnectivity.canonicalHash
+			&& currentConnectivity.networkCount === convertedConnectivity.networkCount
+			&& currentConnectivity.connectedMemberCount === convertedConnectivity.connectedMemberCount;
+
+	if (!topologyUnchanged) {
+		throw new Error(
+			'检测到上一次导入后的原理图连接关系已变化。为避免覆盖手工修改，请先执行“撤回上一次的导入”或处理该状态。',
+		);
+	}
+
+	if (clearRecoveryState) {
+		await clearBatchRecoveryState();
+	}
+}
+
 function assertNoActivePhase4RecoveryState(): void {
 	if (readBatchRecoveryState()) {
 		throw new Error('检测到尚未撤回的导入状态。请先执行“撤回上一次的导入”。');
@@ -1468,7 +1548,7 @@ async function planCandidateStubGeometry(candidate: PrototypeCandidate) {
 		const { stubLine, derivation } = candidate.wirePlan && target.selectedWireIdsAtReportedPoint.includes(candidate.wirePlan.primitiveId)
 			? deriveStubLine(target, plannedLine, candidate.wirePlan.primitiveId, allTargetPoints)
 			: deriveFloatingStubLine(target);
-		const orientation = deriveStubPortOrientation(stubLine);
+		const orientation = deriveStubPortOrientation(stubLine, target.direction);
 		return {
 			target,
 			stubLine,
@@ -1576,7 +1656,7 @@ async function executeNetworkStubPortCandidate(
 			const { primitiveId, nameVisibility } = await createTrackedPort(plan.stubPortPlan, state);
 			createdPorts.push({ member: plan.target.member, primitiveId, nameVisibility });
 			const verifiedMembers = stubPlans.slice(0, portIndex + 1).map(item => item.target.member);
-			const samples = await captureMemberNetworkEvidence(verifiedMembers, candidate.net, [0]);
+			const samples = await captureMemberNetworkEvidence(verifiedMembers, candidate.net);
 			const passed = samples.at(-1)?.passed === true;
 			incrementalPortEvidence.push({
 				portIndex,
@@ -1585,13 +1665,14 @@ async function executeNetworkStubPortCandidate(
 				verifiedMembers,
 				passed,
 				samples,
+				...(!passed ? { portConnection: await captureCreatedPortConnection(primitiveId, plan.stubPortPlan) } : {}),
 			});
 			if (!passed) {
 				throw new Error(`创建端口 ${plan.target.member} 后，ENET 未确认已创建端口的全部成员进入网络 ${candidate.net}。`);
 			}
 		}
 		const allMembers = stubPlans.map(plan => plan.target.member);
-		allMemberEvidence = await captureMemberNetworkEvidence(allMembers, candidate.net, [0]);
+		allMemberEvidence = await captureMemberNetworkEvidence(allMembers, candidate.net);
 		if (!allMemberEvidence.at(-1)?.passed) {
 			throw new Error(`全部短桩端口创建后，ENET 未确认 ${allMembers.length} 个成员统一进入网络 ${candidate.net}。`);
 		}
@@ -1984,7 +2065,7 @@ export async function runFullRegionStubPortRollbackProbe(options: FullRegionProb
 						createdPorts.push({ member: plan.target.member, primitiveId, nameVisibility });
 						await writeBatchRecoveryState(batchState);
 						const verifiedMembers = stubPlans.slice(0, portIndex + 1).map(item => item.target.member);
-						const samples = await captureMemberNetworkEvidence(verifiedMembers, candidate.net, [0]);
+						const samples = await captureMemberNetworkEvidence(verifiedMembers, candidate.net);
 						const passed = samples.at(-1)?.passed === true;
 						incrementalPortEvidence.push({
 							portIndex,
@@ -1993,6 +2074,7 @@ export async function runFullRegionStubPortRollbackProbe(options: FullRegionProb
 							verifiedMembers,
 							passed,
 							samples,
+							...(!passed ? { portConnection: await captureCreatedPortConnection(primitiveId, plan.stubPortPlan) } : {}),
 						});
 						if (!passed) {
 							throw new Error(`创建端口 ${plan.target.member} 后，ENET 未确认已创建端口的全部成员进入网络 ${candidate.net}。`);
@@ -2001,7 +2083,6 @@ export async function runFullRegionStubPortRollbackProbe(options: FullRegionProb
 					allMemberEvidence = await captureMemberNetworkEvidence(
 						stubPlans.map(plan => plan.target.member),
 						candidate.net,
-						[0],
 					);
 					if (!allMemberEvidence.at(-1)?.passed) {
 						throw new Error(`网络 ${candidate.net} 的全部成员连接验证失败。`);
@@ -2038,7 +2119,7 @@ export async function runFullRegionStubPortRollbackProbe(options: FullRegionProb
 				&& batchState.entries.every(entry => entry.status === 'applied')) {
 				const expectedNetworks = Object.fromEntries(storedPlan.portPlans.map(plan => [plan.member, plan.net]));
 				finalMemberEvidence = Object.keys(expectedNetworks).length > 0
-					? await captureExpectedMemberNetworkEvidence(expectedNetworks, [0])
+					? await captureExpectedMemberNetworkEvidence(expectedNetworks)
 					: [{ elapsedMs: 0, networks: {}, expectedNetworks: {}, passed: true, capturedAt: now() }];
 				const pinNoConnectApplied = (batchState.pinNoConnectChanges ?? []).every(change => change.applied);
 				if (!finalMemberEvidence.at(-1)?.passed || !pinNoConnectApplied) {
@@ -2163,7 +2244,7 @@ export async function runFullRegionStubPortRollbackProbe(options: FullRegionProb
 
 export async function runPersistentFullRegionConversion(): Promise<void> {
 	await runProbe('自动预检并正式转换已粘贴文本', async () => {
-		assertNoActivePhase4RecoveryState();
+		await supersedeCompletedPersistentImportRecoveryForNewImport(false);
 		await runWireConflictPreflight({ showPreview: false });
 		const storedPlan = readStoredPhase3Plan();
 		if (!storedPlan?.planReady || storedPlan.blockerCount !== 0) {
@@ -2175,6 +2256,7 @@ export async function runPersistentFullRegionConversion(): Promise<void> {
 				}),
 				jsonPreviewTab('阻止项', storedPlan?.blockers ?? []),
 				jsonPreviewTab('警告项', storedPlan?.warnings ?? []),
+				jsonPreviewTab('属性归属诊断', storedPlan?.attributeInspection ?? []),
 				jsonPreviewTab('网络变化', storedPlan?.networkChanges ?? []),
 			]);
 			return;
@@ -2196,6 +2278,7 @@ export async function runPersistentFullRegionConversion(): Promise<void> {
 			]);
 			return;
 		}
+		await supersedeCompletedPersistentImportRecoveryForNewImport();
 		await runFullRegionStubPortRollbackProbe({
 			previewTitle: '原理图结构文本桥：导入连接关系结果',
 			retainConversion: true,
@@ -2204,7 +2287,12 @@ export async function runPersistentFullRegionConversion(): Promise<void> {
 }
 
 async function prepareCurrentSelectionPlan(mode: 'one-click-full-debug' | 'one-click-persistent-conversion') {
-	assertNoActivePhase4RecoveryState();
+	if (mode === 'one-click-persistent-conversion') {
+		await supersedeCompletedPersistentImportRecoveryForNewImport(false);
+	}
+	else {
+		assertNoActivePhase4RecoveryState();
+	}
 	const snapshot = await buildCurrentRegionSnapshot();
 	await eda.sys_Storage.setExtensionUserConfig(REGION_SNAPSHOT_STORAGE_KEY, snapshot);
 	await eda.sys_Storage.setExtensionUserConfig(IMPORT_TEXT_STORAGE_KEY, JSON.stringify(snapshot.region, null, 2));
@@ -2253,6 +2341,7 @@ export async function runOneClickFullDebug(): Promise<void> {
 export async function runOneClickPersistentConversion(): Promise<void> {
 	await runProbe('一键正式转换当前框选', async () => {
 		const preparation = await prepareCurrentSelectionPlan('one-click-persistent-conversion');
+		await supersedeCompletedPersistentImportRecoveryForNewImport();
 		await runFullRegionStubPortRollbackProbe({
 			oneClickContext: preparation.context,
 			retainConversion: true,
